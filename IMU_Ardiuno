@@ -1,1 +1,285 @@
+#include <Wire.h>
+// MPU9250 Register Addresses
+#define MPU9250_ADDRESS 0x68  // MPU9250 I2C adresi (A0 pin'i LOW ise bu adres)
+#define AK8963_ADDRESS 0x0C  // Manyetometre I2C adresi (MAGNETOMETER için)
 
+#define ACCEL_XOUT_H 0x3B
+#define ACCEL_XOUT_L 0x3C
+#define ACCEL_YOUT_H 0x3D
+#define ACCEL_YOUT_L 0x3E
+#define ACCEL_ZOUT_H 0x3F
+#define ACCEL_ZOUT_L 0x40
+
+#define MAGNETOMETER_XOUT_L 0x03
+#define MAGNETOMETER_XOUT_H 0x04
+#define MAGNETOMETER_YOUT_L 0x05
+#define MAGNETOMETER_YOUT_H 0x06
+#define MAGNETOMETER_ZOUT_L 0x07
+#define MAGNETOMETER_ZOUT_H 0x08
+
+// Magnetometer Registers
+#define AK8963_CNTL1 0x0A           // Control register 1
+#define AK8963_CNTL2 0x0B           // Control register 2
+#define AK8963_ST1 0x02             // Status 1 register
+#define AK8963_HXL 0x03             // Magnetometer data registers
+
+#define GYRO_XOUT_H 0x43
+#define GYRO_XOUT_L 0x44
+#define GYRO_YOUT_H 0x45
+#define GYRO_YOUT_L 0x46
+#define GYRO_ZOUT_H 0x47
+#define GYRO_ZOUT_L 0x48
+
+#define sampleFreq	512.0f		// sample frequency in Hz
+#define betaDef		0.1f		// 2 * proportional gain
+
+#define RAD_TO_DEG 57.2957795131f
+
+
+const float magBias[3] = {8.46, -29.32, 18.55}; // Hard-iron offsets
+const float magScale[3][3] = {                  // Soft-iron correction matrix
+  {1.038,  0.018, -0.008},
+  {0.018,  0.952,  0.158},
+  {-0.008, 0.158,  1.038}
+};
+
+void setup() 
+{
+  Serial.begin(115200);
+  Wire.begin();
+  // Initialize MPU9250
+  initMPU9250();
+  // Initialize Magnetometer (AK8963)
+  initAK8963();
+  delay(100); // Wait for sensors to stabilize
+}
+
+float phiHat_rad = 0.0f;
+float thetaHat_rad = 0.0f;
+unsigned long lastTime = 0;  // Add this global variable
+unsigned long last_pub = millis();
+  static uint8_t errorCount = 0;
+/********************ROS*****************/
+
+void loop() {
+  if (millis() - last_pub >= 10) 
+  { 
+    last_pub = millis();
+    // Read accelerometer
+    int16_t ax_raw = readSensorData(MPU9250_ADDRESS, ACCEL_XOUT_H);
+    int16_t ay_raw = readSensorData(MPU9250_ADDRESS, ACCEL_YOUT_H);
+    int16_t az_raw = readSensorData(MPU9250_ADDRESS, ACCEL_ZOUT_H);
+
+    int16_t gx_raw = readSensorData(MPU9250_ADDRESS, GYRO_XOUT_H);
+    int16_t gy_raw = readSensorData(MPU9250_ADDRESS, GYRO_YOUT_H);
+    int16_t gz_raw = readSensorData(MPU9250_ADDRESS, GYRO_ZOUT_H);
+
+    int16_t mx_raw, my_raw, mz_raw;
+    bool magOK = readMagnetometer(&mx_raw, &my_raw, &mz_raw);
+    // Check for any critical errors
+    if (ax_raw == 0 && ay_raw == 0 && az_raw == 0 || 
+      gx_raw == 0 && gy_raw == 0 && gz_raw == 0 || 
+      !magOK) 
+    {
+      if (++errorCount > 5) 
+      {
+        recoverI2C();
+        errorCount = 0;
+      }
+      return;
+    }
+    errorCount = 0; // Reset counter on successful read
+  
+    float ax = (ax_raw / 8192.0) * 9.81;
+    float ay = (ay_raw / 8192.0) * 9.81;
+    float az = (az_raw / 8192.0) * 9.81;
+
+    // Read gyroscope
+    float gx = (gx_raw / 16.4) * (M_PI / 180.0);
+    float gy = (gy_raw / 16.4) * (M_PI / 180.0);
+    float gz = (gz_raw / 16.4) * (M_PI / 180.0);
+
+
+    Serial.print(ax); Serial.print(",");
+    Serial.print(ay); Serial.print(",");
+    Serial.print(az); Serial.print(",");
+    Serial.print(gx); Serial.print(",");
+    Serial.print(gy); Serial.print(",");
+    Serial.print(gz); Serial.print(",");
+    Serial.print(mx_raw*1.0); Serial.print(",");
+    Serial.print(my_raw*1.0); Serial.print(",");
+    Serial.println(mz_raw*1.0);
+  }
+}
+/********************ROS*****************/
+
+/********************MOTİONCAL*****************
+void loop() {
+  if (millis() - last_pub >= 20) 
+  { // 100Hz
+    last_pub = millis();
+    // Read raw data (no unit conversion)
+    int16_t ax_raw = readSensorData(MPU9250_ADDRESS, ACCEL_XOUT_H);
+    int16_t ay_raw = readSensorData(MPU9250_ADDRESS, ACCEL_YOUT_H);
+    int16_t az_raw = readSensorData(MPU9250_ADDRESS, ACCEL_ZOUT_H);
+
+    int16_t gx_raw = readSensorData(MPU9250_ADDRESS, GYRO_XOUT_H);
+    int16_t gy_raw = readSensorData(MPU9250_ADDRESS, GYRO_YOUT_H);
+    int16_t gz_raw = readSensorData(MPU9250_ADDRESS, GYRO_ZOUT_H);
+
+
+
+        int16_t mx_raw, my_raw, mz_raw;
+        bool magOK = readMagnetometer(&mx_raw, &my_raw, &mz_raw);
+
+        // Check for any critical errors
+        if (ax_raw == 0 && ay_raw == 0 && az_raw == 0 || 
+            gx_raw == 0 && gy_raw == 0 && gz_raw == 0 || 
+            !magOK) {
+          if (++errorCount > 5) {
+            recoverI2C();
+            errorCount = 0;
+          }
+          return;
+        }
+        errorCount = 0; // Reset counter on successful read
+
+    // Send in MotionCal CSV format
+    Serial.print("Raw:");
+    Serial.print(ax_raw); Serial.print(",");
+    Serial.print(ay_raw); Serial.print(",");
+    Serial.print(az_raw); Serial.print(",");
+    Serial.print(gx_raw); Serial.print(",");
+    Serial.print(gy_raw); Serial.print(",");
+    Serial.print(gz_raw); Serial.print(",");
+    Serial.print(mx_raw); Serial.print(",");
+    Serial.print(my_raw); Serial.print(",");
+    Serial.println(mz_raw);
+  }
+}
+*****************MOTIONCAL*****************/
+
+
+void recoverI2C() {
+  Wire.end();
+  delay(100);
+  Wire.begin();
+  initMPU9250();
+  initAK8963();
+}
+/*
+void calibrateMagnetometer(int16_t mx, int16_t my, int16_t mz, 
+                          float* mx_cal, float* my_cal, float* mz_cal) {
+  // 1. Subtract hard-iron offsets
+  float x = mx - magBias[0];
+  float y = my - magBias[1];
+  float z = mz - magBias[2];
+
+  x *= 0.15f;
+  y *= 0.15f;
+  z *= 0.15f;
+
+  // 2. Apply soft-iron correction (matrix multiplication)
+  *mx_cal = x * magScale[0][0] + y * magScale[0][1] + z * magScale[0][2];
+  *my_cal = x * magScale[1][0] + y * magScale[1][1] + z * magScale[1][2];
+  *mz_cal = x * magScale[2][0] + y * magScale[2][1] + z * magScale[2][2];
+}
+*/
+void initMPU9250() {
+  // Wake up MPU9250
+  writeRegister(MPU9250_ADDRESS, 0x6B, 0x00); // PWR_MGMT_1 register
+  
+  // Configure gyro and accelerometer
+  writeRegister(MPU9250_ADDRESS, 0x1B, 0x18); 
+  writeRegister(MPU9250_ADDRESS, 0x1C, 0x08); 
+  
+  // Configure digital low pass filter
+  writeRegister(MPU9250_ADDRESS, 0x1A, 0x03); // DLPF=3 (41Hz gyro BW)
+  
+  // Enable bypass mode to access magnetometer directly
+  writeRegister(MPU9250_ADDRESS, 0x37, 0x02); // INT_PIN_CFG register
+}
+
+void initAK8963() {
+  // Reset magnetometer
+  writeRegister(AK8963_ADDRESS, AK8963_CNTL2, 0x01); // Soft reset
+  delay(100);
+  
+  // Set magnetometer to continuous mode 2 (100Hz)
+  // Bit 4 = 1 (16-bit output)
+  // Bits [3:0] = 0110 (Continuous measurement mode 2)
+  writeRegister(AK8963_ADDRESS, AK8963_CNTL1, 0x16);
+}
+
+bool readMagnetometer(int16_t* mx, int16_t* my, int16_t* mz) {
+  Wire.beginTransmission(AK8963_ADDRESS);
+  Wire.write(AK8963_ST1);
+  if (Wire.endTransmission(false) != 0) {
+    return false; // I2C error
+  }
+  
+  uint8_t bytesReceived = Wire.requestFrom(AK8963_ADDRESS, 1);
+  if (bytesReceived != 1) {
+    return false; // Did not receive ST1
+  }
+  
+  uint8_t st1 = Wire.read();
+  if (!(st1 & 0x01)) {
+    return false; // Data not ready
+  }
+
+  Wire.beginTransmission(AK8963_ADDRESS);
+  Wire.write(AK8963_HXL);
+  if (Wire.endTransmission(false) != 0) {
+    return false; // I2C error
+  }
+  
+  bytesReceived = Wire.requestFrom(AK8963_ADDRESS, 7);
+  if (bytesReceived != 7) {
+    return false; // Incomplete data
+  }
+
+  uint8_t rawData[7];
+  for (int i = 0; i < 7; i++) {
+    rawData[i] = Wire.read();
+  }
+  
+  uint8_t st2 = rawData[6];
+  *mx = (int16_t)(rawData[1] << 8 | rawData[0]);
+  *my = (int16_t)(rawData[3] << 8 | rawData[2]);
+  *mz = (int16_t)(rawData[5] << 8 | rawData[4]);
+
+  return !(st2 & 0x08); // True if no overflow
+}
+
+int16_t readSensorData(uint8_t deviceAddress, uint8_t registerAddress) {
+  Wire.beginTransmission(deviceAddress);
+  Wire.write(registerAddress);
+  if (Wire.endTransmission(false) != 0) {
+    return 0; // I2C error
+  }
+
+  uint8_t bytesReceived = Wire.requestFrom(deviceAddress, 2);
+  if (bytesReceived != 2) {
+    return 0; // Incomplete data
+  }
+
+  uint8_t highByte = Wire.read();
+  uint8_t lowByte = Wire.read();
+  return (int16_t)(highByte << 8 | lowByte);
+}
+
+uint8_t readRegister(uint8_t deviceAddress, uint8_t registerAddress) {
+  Wire.beginTransmission(deviceAddress);
+  Wire.write(registerAddress);
+  Wire.endTransmission(false);
+  Wire.requestFrom(deviceAddress, 1);
+  return Wire.read();
+}
+
+void writeRegister(uint8_t deviceAddress, uint8_t registerAddress, uint8_t value) {
+  Wire.beginTransmission(deviceAddress);
+  Wire.write(registerAddress);
+  Wire.write(value);
+  Wire.endTransmission();
+} 
